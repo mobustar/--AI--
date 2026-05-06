@@ -1,8 +1,37 @@
-# reinforcement_learning — 強化学習コード集
+# reinforcement_learning
 
-NumPy のみで実装した、Q テーブルベース強化学習のフルセット。
-**Env × Policy × Algorithm** の各機能ごとに複数のアルゴリズムを用意し、
-戦略パターンで切り替えられる。
+NumPy **のみ**で実装した Q テーブルベース強化学習のフルセット。
+3 種類の環境に対し、方策・アルゴリズムの組み合わせを比較できる。
+
+---
+
+## 強化学習の基本サイクル
+
+```
+         ┌─────────────────────────────────┐
+         │            Agent                │
+         │  ┌──────────┐  ┌────────────┐  │
+         │  │  Policy  │  │ Algorithm  │  │
+         │  │ (行動選択)│  │(Q テーブル)│  │
+         │  └──────────┘  └────────────┘  │
+         └───────┬──────────────┬──────────┘
+                 │ action a      │ update Q(s,a)
+                 ▼              ▲
+         ┌───────────────┐      │
+         │      Env      │──────┘
+         │  (状態・報酬)  │  reward r, next_state s'
+         └───────────────┘
+```
+
+| コンポーネント | 役割 | 選択肢 |
+|--------------|------|--------|
+| **Env** | 状態・行動・報酬を定義する環境 | 3 種 |
+| **Policy** | Q 値から行動を選ぶ探索戦略 | 4 種 |
+| **Algorithm** | Q テーブルの更新ルール | 6 種 |
+
+3 × 4 × 6 = **72 通り**を 3 seed 平均で比較できる。
+
+---
 
 ## ディレクトリ構成
 
@@ -11,129 +40,545 @@ reinforcement_learning/
 ├── env.py         # 環境 3 種
 ├── policy.py      # 行動選択ポリシー 4 種
 ├── algorithm.py   # 学習アルゴリズム 6 種
-├── trainer.py     # 統合トレーナー (複数 seed 平均評価)
-├── main.py        # 全 72 通り比較
-└── README.md
+├── trainer.py     # 複数 seed 評価トレーナー
+└── main.py        # 全 72 通り比較 + 推奨構成の詳細評価
 ```
 
-## 各機能のアルゴリズム選択肢
+---
 
-### Env (3 種)
+## 共通記号
 
-| 名前 | クラス | 特徴 |
-|------|--------|------|
-| `gridworld`  | `GridWorld`       | 4×4 決定的、ゴール +1 / 各ステップ -0.04 |
-| `cliffwalk`  | `CliffWalk`       | 4×12、Sutton & Barto 古典問題、崖 -100 |
-| `stochastic` | `StochasticGrid`  | 4×4 滑り確率付き、Double Q の効果検証用 |
-
-### Policy (4 種)
-
-| 名前 | クラス | 行動選択則 |
-|------|--------|-----------|
-| `eps`       | `EpsilonGreedy`      | 確率 ε でランダム、それ以外 argmax |
-| `decay_eps` | `DecayEpsilonGreedy` | ε を幾何減衰 (探索→活用への滑らかな移行) |
-| `boltzmann` | `Boltzmann`          | softmax(Q/τ) 確率分布で選択 |
-| `ucb`       | `UCB1`               | Q + c√(ln N(s) / N(s,a)) |
-
-### Algorithm (6 種)
-
-| 名前 | クラス | TD ターゲット | 特徴 |
-|------|--------|--------------|------|
-| `mc`       | `MonteCarlo`      | `G_t = Σ γ^k r_{t+k+1}` | エピソード後にまとめて更新 |
-| `sarsa`    | `SARSA`           | `r + γ Q(s', a')` | On-policy, 安全な方策 |
-| `q`        | `QLearning`       | `r + γ max_a' Q(s', a')` | Off-policy, 最適方策 |
-| `esarsa`   | `ExpectedSARSA`   | `r + γ Σ_a' π(a'\|s') Q(s',a')` | 低分散 |
-| `double_q` | `DoubleQLearning` | `r + γ Q_B(s', argmax Q_A)` | **最大化バイアス除去** |
-| `dyna_q`   | `DynaQ`           | Q-learning + プランニング | **サンプル効率最高** |
-
-## 重要な数式
-
-### TD 学習の一般形
 ```
-Q(s,a) ← Q(s,a) + α [target - Q(s,a)]
-target = 各アルゴリズムで異なる
+S : 状態空間（有限離散）
+A : 行動空間   |A| = n_actions = 4
+s ∈ S : 現在の状態
+a ∈ A : 選択した行動
+r ∈ ℝ : 報酬
+s'    : 遷移後の状態
+γ ∈ [0,1) : 割引率（デフォルト 0.95）
+α ∈ (0,1] : 学習率（デフォルト 0.1）
+Q : S×A → ℝ : 行動価値テーブル（初期値 0）
 ```
 
-### Double Q-Learning の最大化バイアス除去
-通常の Q-learning は `max_a' Q(s',a')` でバイアスがかかる。
-Double Q では行動選択と評価を分離する:
+---
+
+## Env（env.py）— 3 種
+
+すべて OpenAI Gym 風のインタフェース: `reset()` → `step(action)` → `(next_state, reward, done)`
+行動は 4 方向: `0=上, 1=右, 2=下, 3=左`。状態は `row × 幅 + col` の整数で表現。
+
+---
+
+### GridWorld（4×4 格子）
+
 ```
-50% で Q_A を更新:  target = r + γ Q_B(s', argmax_a' Q_A(s',a'))
-50% で Q_B を更新:  target = r + γ Q_A(s', argmax_a' Q_B(s',a'))
+┌───┬───┬───┬───┐
+│ S │   │   │   │   S = スタート (0,0)
+├───┼───┼───┼───┤   G = ゴール  (3,3)
+│   │   │   │   │
+├───┼───┼───┼───┤   報酬: ゴール到達 = +1.0
+│   │   │   │   │         各ステップ  = −0.04
+├───┼───┼───┼───┤         100 ステップ超過 → 強制終了
+│   │   │   │ G │
+└───┴───┴───┴───┘
 ```
 
-### UCB1 の信頼区間
-```
-a* = argmax_a [ Q(s,a) + c · sqrt( ln N(s) / N(s,a) ) ]
-```
-N(s) = 状態 s の訪問回数, N(s,a) = (s,a) の訪問回数。
-未試行の (s,a) は ∞ とみなして優先的に選ばれる。
+**定義**:
 
-### Dyna-Q の planning 更新
 ```
-1) 実環境で 1 ステップ → Q を更新
-2) 観測 (s,a,r,s') を model に保存
-3) model からランダム抽出 n 回 → Q を擬似更新
+状態: s = row × 4 + col   s ∈ {0,...,15}
+遷移: 行動 a = (Δrow, Δcol) に従って移動
+      壁に当たると静止（clip で実装）
+
+報酬関数:
+  R(s, a, s') = +1.0   if s' = ゴール(15)
+              = −0.04  otherwise
+
+終了条件:
+  s' = ゴール  または  ステップ数 ≥ 100
 ```
+
+---
+
+### CliffWalk（4×12 格子）
+
+Sutton & Barto の古典的問題。SARSA と Q-learning の挙動の違いを観察できる。
+
+```
+┌──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┐
+│  │  │  │  │  │  │  │  │  │  │  │  │  row 0
+├──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┤
+│  │  │  │  │  │  │  │  │  │  │  │  │  row 1
+├──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┤
+│  │  │  │  │  │  │  │  │  │  │  │  │  row 2
+├──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┤
+│ S│XX│XX│XX│XX│XX│XX│XX│XX│XX│XX│ G│  row 3
+└──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┘
+
+Q-learning の最適経路（崖ギリギリ）: 報酬 ≈ −13
+  S→→→→→→→→→→→G
+
+SARSA の学習経路（安全な迂回）: 報酬 ≈ −15〜−17
+  S↑→→→→→→→→→↓G
+```
+
+**定義**:
+
+```
+状態: s = row × 12 + col   s ∈ {0,...,47}
+崖:   Cliff = {(3, col) : 1 ≤ col ≤ 10}
+
+報酬関数:
+  R(s, a, s') = −1.0    if s' = ゴール(3,11)   かつ 終了
+              = −100.0  if s' ∈ Cliff  →  スタート(3,0) にリセット
+              = −1.0    otherwise
+
+終了条件:
+  s' = ゴール  または  ステップ数 ≥ 200
+```
+
+---
+
+### StochasticGrid（4×4 滑り付き格子）
+
+```
+┌───┬───┬───┬───┐
+│ S │   │   │   │   X = 穴 {(1,1),(2,3)}: 報酬 −1、終了
+├───┼───┼───┼───┤   G = ゴール (3,3)   : 報酬 +1、終了
+│   │ X │   │   │   slip_prob = 0.2
+├───┼───┼───┼───┤   → 20% の確率で隣接行動にランダムにずれる
+│   │   │   │ X │
+├───┼───┼───┼───┤
+│   │   │   │ G │
+└───┴───┴───┴───┘
+```
+
+**定義**:
+
+```
+確率的遷移:
+  u ~ Uniform(0, 1)
+  if u < slip_prob:
+    a' = (a + choice({−1, +1})) mod 4   （左右どちらかにずれる）
+  else:
+    a' = a
+
+報酬関数:
+  R(s, a, s') = +1.0  if s' = ゴール
+              = −1.0  if s' ∈ Holes
+              =  0.0  otherwise
+
+終了条件:
+  s' = ゴール  または  s' ∈ Holes  または  ステップ数 ≥ 100
+```
+
+| 環境名 | クラス | 状態数 | 行動数 | 主な用途 |
+|--------|--------|:----:|:----:|----------|
+| `gridworld` | `GridWorld` | 16 | 4 | アルゴリズムの基本動作確認 |
+| `cliffwalk` | `CliffWalk` | 48 | 4 | SARSA vs Q-learning の比較 |
+| `stochastic` | `StochasticGrid` | 16 | 4 | Double Q の最大化バイアス除去の検証 |
+
+> **ファクトリ関数**: `get_env("gridworld")`
+
+---
+
+## Policy（policy.py）— 4 種
+
+Q 値から具体的な行動を選ぶ方策。**探索（Exploration）** と **活用（Exploitation）** のバランスを担う。
+
+```
+← 探索重視 ────────────────────── 活用重視 →
+  完全ランダム   EpsilonGreedy   argmax のみ
+  ε=1.0          ε=0.1           ε=0.0
+```
+
+---
+
+### EpsilonGreedy（ε-greedy）
+
+**定義**:
+
+```
+u ~ Uniform(0, 1)
+
+π(s) = { 一様ランダム a ~ Uniform(A)   if u < ε
+        { argmax_{a'} Q(s, a')          otherwise
+
+同点処理: max Q(s,·) を達成する行動が複数ある場合、
+          その中からランダムに 1 つを選ぶ（偏り防止）
+```
+
+| パラメータ | デフォルト | 意味 |
+|-----------|:-------:|------|
+| `epsilon` | 0.1 | 探索確率 ε |
+
+**いつ使うか**: 比較用ベースライン。シンプルな決定的環境。
+
+---
+
+### DecayEpsilonGreedy（減衰 ε-greedy）
+
+**定義**:
+
+```
+EpsilonGreedy と同じ行動選択式を使い、
+エピソード終了時に ε を減衰させる。
+
+エピソード終了時の更新:
+  ε_{t+1} = max(ε_t × decay, ε_min)
+
+初期値 ε_0 から始まり、最小値 ε_min に漸近する。
+
+t エピソード後の ε の値:
+  ε_t = max(ε_0 × decay^t, ε_min)
+```
+
+| パラメータ | デフォルト | 意味 |
+|-----------|:-------:|------|
+| `epsilon` | 1.0 | 初期探索確率 ε_0 |
+| `decay` | 0.995 | 幾何減衰係数 |
+| `epsilon_min` | 0.01 | 下限 ε_min |
+
+**いつ使うか**: **全環境で推奨**。探索→活用の自然な移行。
+
+---
+
+### Boltzmann（ソフトマックス探索）
+
+**定義**:
+
+```
+Q(s, a) / τ を各行動のスコアとして softmax 確率を計算する。
+
+【log-sum-exp による数値安定化】
+  q = Q(s, ·) / τ                    （スコアベクトル）
+  q' = q − max_{a'} q(a')            （最大値を引いてオーバーフロー防止）
+
+【確率分布】
+  P(a | s) = exp(q'(a)) / Σ_{a'} exp(q'(a'))
+
+【行動選択】
+  a ~ Categorical(P(· | s))          （確率分布からサンプリング）
+
+τ → ∞ : P(a|s) → 1/|A|             （一様分布 = 完全探索）
+τ → 0  : P(a*|s) → 1               （argmax Q = 完全活用）
+          （a* = argmax Q(s,·)）
+```
+
+| パラメータ | デフォルト | 意味 |
+|-----------|:-------:|------|
+| `tau` | 0.5 | 温度 τ（大きいほど探索的）|
+
+**いつ使うか**: Q 値の差を確率に反映させた滑らかな探索。
+
+---
+
+### UCB1（上限信頼区間）
+
+**定義**:
+
+```
+N(s)   : 状態 s を訪問した総回数
+N(s,a) : 状態 s で行動 a を選んだ回数（初期値 0）
+
+【未試行の行動がある場合】
+  untried = {a ∈ A : N(s, a) = 0}
+  if untried ≠ ∅:
+    a ~ Uniform(untried)               （未試行を優先して選ぶ）
+
+【全行動試行済みの場合】
+  UCB(s, a) = Q(s, a)  +  c · √( ln N(s) / N(s, a) )
+
+  a* = argmax_{a ∈ A} UCB(s, a)
+
+  同点処理: UCB 最大の行動が複数あればランダムに 1 つ
+
+【訪問回数の更新】
+  N(s, a*) ← N(s, a*) + 1
+  N(s)     ← N(s) + 1
+```
+
+| パラメータ | デフォルト | 意味 |
+|-----------|:-------:|------|
+| `c` | 1.4 | 探索ボーナスの重み（√2 ≈ 1.41 が理論的推奨）|
+
+**いつ使うか**: 全 (s,a) を偏りなく試行したい確率的環境。
+
+> **ファクトリ関数**: `get_policy("decay_eps", epsilon=1.0, decay=0.995, epsilon_min=0.05)`
+
+---
+
+## Algorithm（algorithm.py）— 6 種
+
+Q テーブルの更新ルール。すべてに共通する TD 更新式:
+
+```
+Q(s, a) ← Q(s, a)  +  α · [target − Q(s, a)]
+                              ↑ TD 誤差（δ）
+
+target の計算方法がアルゴリズムごとに異なる。
+```
+
+---
+
+### MonteCarlo（モンテカルロ法）
+
+**定義**:
+
+```
+エピソード τ = (s_0, a_0, r_0, s_1, a_1, r_1, ..., s_T) を収集する。
+
+【収益（リターン）の計算】
+  G_T     = 0
+  G_{t}   = r_t  +  γ · G_{t+1}     t = T−1, T−2, ..., 0
+
+  （後ろから逐次計算: G_t = r_t + γ r_{t+1} + γ² r_{t+2} + ...）
+
+【Every-Visit 更新】
+  各時刻 t について（同じ (s,a) が複数回出現しても全て更新）:
+    Q(s_t, a_t) ← Q(s_t, a_t)  +  α · [G_t − Q(s_t, a_t)]
+```
+
+**利点**: TD のブートストラップバイアスがない（実際の報酬のみ使用）。
+**欠点**: エピソードが終わるまで更新できない。分散が大きい。
+
+---
+
+### SARSA（On-policy TD(0)）
+
+**定義**:
+
+```
+On-policy: 学習に使う方策 π と評価する方策が同じ
+
+【1 ステップの更新】
+  状態 s で方策 π により行動 a を選ぶ
+  環境を 1 ステップ実行: (s, a) → (r, s')
+  次状態 s' でも方策 π により次の行動 a' を先に選ぶ
+
+  target = r  +  γ · Q(s', a') · 𝟙[not done]
+
+  Q(s, a) ← Q(s, a)  +  α · [target − Q(s, a)]
+
+  (s, a) ← (s', a')   （タプルを引き継いで次ステップへ）
+
+名前の由来: State, Action, Reward, (next)State, (next)Action
+```
+
+**利点**: 実際に実行する方策（探索含む）の価値を正確に学べる。安全な経路を選ぶ傾向。
+**いつ使うか**: 失敗コストが高く安全性を重視する場面。
+
+---
+
+### QLearning（Off-policy TD(0)）
+
+**定義**:
+
+```
+Off-policy: 行動選択は方策 π（ε-greedy 等）で行うが、
+            更新には別の（最適）方策の価値を使う
+
+【1 ステップの更新】
+  状態 s で方策 π により行動 a を選ぶ
+  環境を 1 ステップ実行: (s, a) → (r, s')
+
+  target = r  +  γ · max_{a'} Q(s', a') · 𝟙[not done]
+                  ↑ 次状態での最善行動の Q 値（Greedy）
+
+  Q(s, a) ← Q(s, a)  +  α · [target − Q(s, a)]
+
+  s ← s'
+```
+
+**利点**: 探索方策に依存せず最適方策を学べる。CliffWalk で最高報酬を実現。
+**いつ使うか**: 最終的な最高パフォーマンスを目指す場面。
+
+---
+
+### ExpectedSARSA（期待値 SARSA）
+
+**定義**:
+
+```
+SARSA の次行動 a' のサンプリングを期待値に置き換える。
+
+【ε-greedy 方策の期待 Q 値】
+  max_actions = {a' : Q(s', a') = max_{a''} Q(s', a'')}
+  n_max = |max_actions|
+
+  π(a' | s') = ε / |A|                      （ランダム成分）
+             + (1 − ε) / n_max              （greedy 成分、同点は均等配分）
+               （ただし a' ∈ max_actions の場合のみ後項を加算）
+
+  E_π[Q(s', ·)] = Σ_{a'} π(a' | s') · Q(s', a')
+
+【更新】
+  target = r  +  γ · E_π[Q(s', ·)] · 𝟙[not done]
+
+  Q(s, a) ← Q(s, a)  +  α · [target − Q(s, a)]
+```
+
+**利点**: 1 つの a' をサンプルする SARSA より分散が小さく安定して収束する。
+
+---
+
+### DoubleQLearning（ダブル Q 学習）
+
+**定義**:
+
+```
+Q_A, Q_B ∈ ℝ^{|S|×|A|} を独立に保持する（初期値 0）。
+
+【行動選択】
+  Q_mean(s, a) = (Q_A(s, a) + Q_B(s, a)) / 2
+  a = Policy.select(Q_mean, s)
+
+【更新（50% の確率でいずれかを選択）】
+  u ~ Uniform(0, 1)
+
+  if u < 0.5:      （Q_A を更新）
+    a_best = argmax_{a'} Q_A(s', a')         （行動選択は Q_A）
+    target = r  +  γ · Q_B(s', a_best) · 𝟙[not done]   （評価は Q_B）
+    Q_A(s, a) ← Q_A(s, a)  +  α · [target − Q_A(s, a)]
+
+  else:             （Q_B を更新）
+    a_best = argmax_{a'} Q_B(s', a')
+    target = r  +  γ · Q_A(s', a_best) · 𝟙[not done]
+    Q_B(s, a) ← Q_B(s, a)  +  α · [target − Q_B(s, a)]
+
+【最大化バイアスの除去】
+  通常の Q-learning:
+    E[max_a Q(s',a)] ≥ max_a E[Q(s',a)]     （ Jensen の不等式）
+    → Q 推定にノイズがあると max 操作で過大評価が生じる
+
+  Double Q:
+    E[Q_B(s', argmax Q_A(s',·))] = max_a E[Q(s',a)]  （近似的に）
+    → 行動選択と価値評価を分離することでバイアスが相殺される
+```
+
+**利点**: 確率的環境で Q-learning より安定した収束。最大化バイアスがない。
+
+---
+
+### DynaQ（モデルベース + モデルフリーの統合）
+
+**定義**:
+
+```
+model : (S×A) → (ℝ × S × {True,False}) の決定的遷移モデル
+observed_pairs : これまで観測した (s,a) ペアのリスト
+
+【1 ステップごとの処理】
+
+  ① 実環境での直接更新（Q-Learning と同じ）:
+       target = r  +  γ · max_{a'} Q(s', a') · 𝟙[not done]
+       Q(s, a) ← Q(s, a)  +  α · [target − Q(s, a)]
+
+  ② モデルへの保存:
+       model[(s, a)] ← (r, s', done)
+       if (s, a) ∉ observed_pairs: observed_pairs.append((s, a))
+
+  ③ プランニング（n_planning 回繰り返す）:
+       (ps, pa) ~ Uniform(observed_pairs)
+       (pr, ps', pdone) = model[(ps, pa)]
+       ptarget = pr  +  γ · max_{a'} Q(ps', a') · 𝟙[not pdone]
+       Q(ps, pa) ← Q(ps, pa)  +  α · [ptarget − Q(ps, pa)]
+
+【サンプル効率の改善】
+  実環境 1 ステップにつき n_planning 回の追加更新が行われるため、
+  実エピソード数 T に対して実質 T × (1 + n_planning) 回の Q 更新が行われる。
+```
+
+| パラメータ | デフォルト | 意味 |
+|-----------|:-------:|------|
+| `n_planning` | 20 | 1 ステップあたりのプランニング回数 |
+
+**利点**: 実サンプルが少ない状況でも高速に収束。
+**欠点**: 決定的モデルのため確率的環境では最後の観測のみを記憶する。
+
+> **ファクトリ関数**: `get_algorithm("dyna_q", n_states, n_actions, n_planning=10)`
+
+---
+
+## Trainer（trainer.py）
+
+複数 seed で学習・評価し、平均報酬と標準偏差を返す。
+
+**定義**:
+
+```
+train_and_evaluate の返り値:
+
+  eval_rewards = [evaluate_greedy(env_seed_k, algo_seed_k) for k in range(n_seeds)]
+
+  mean_eval = (1/n_seeds) Σ_k eval_rewards[k]
+  std_eval  = √( (1/n_seeds) Σ_k (eval_rewards[k] − mean_eval)² )
+
+evaluate_greedy:
+  貪欲方策 π_greedy(s) = argmax_a Q(s,a) で n_eval_episodes 回実行し平均を返す。
+  訓練中の ε-greedy ノイズを含まない純粋な性能を測定する。
+```
+
+---
 
 ## 使い方
+
+### 基本
 
 ```python
 from env       import get_env
 from policy    import get_policy
 from algorithm import get_algorithm
 
-env = get_env("cliffwalk")
-pol = get_policy("decay_eps", epsilon=1.0, decay=0.995)
+env  = get_env("cliffwalk")
+pol  = get_policy("decay_eps", epsilon=1.0, decay=0.995, epsilon_min=0.05)
 algo = get_algorithm("q", env.n_states, env.n_actions, alpha=0.1, gamma=0.95)
 
 rewards = algo.train(env, pol, n_episodes=500)
 
-# 学習後の貪欲方策を実行
 state = env.reset()
-done = False
+done  = False
+total = 0
 while not done:
     a = algo.greedy_action(state)
     state, r, done = env.step(a)
+    total += r
+print(f"合計報酬: {total}")
 ```
 
-## 全組み合わせ比較
+### 全 72 通り比較
 
 ```bash
 python main.py
 ```
 
-72 通り (3×4×6) を 3 seed 平均で評価する。
+---
 
-## 環境ごとの最良構成 (実験結果より)
+## 環境ごとの推奨構成
 
-| 環境 | 推奨 Policy + Algorithm | 期待報酬 | 理由 |
-|------|------------------------|---------|------|
-| `gridworld`  | `decay_eps + dyna_q`     | 0.80   | 短経路を即座に発見 |
-| `cliffwalk`  | `decay_eps + q`          | -13.0  | 最短経路 = 報酬最大 (SARSA は -15 で安全側) |
-| `stochastic` | `decay_eps + double_q`   | 環境次第 | 最大化バイアス除去で偏りを抑制 |
+| 環境 | 推奨 Policy | 推奨 Algorithm | 理由 |
+|------|------------|----------------|------|
+| `gridworld` | `decay_eps` | `dyna_q` | プランニングで少ない実サンプルでも素早く収束 |
+| `cliffwalk` | `decay_eps` | `q` | Off-policy で崖際の最短経路（最高報酬）を学習 |
+| `stochastic` | `decay_eps` | `double_q` | 最大化バイアスを除去して確率的変動に対処 |
 
-## 教育的観察ポイント
+---
 
-1. **CliffWalk で SARSA vs Q-learning の差**
-   Q-learning は崖際の最短経路 (-13) を学ぶが、ε-greedy のノイズで時々落ちる。
-   SARSA は方策のノイズも考慮し、上を回る安全な経路 (-15~-17) を学ぶ。
-   報酬最大化と安全性のトレードオフを体験できる古典問題。
+## 精度向上のための設計選択
 
-2. **確率的環境で Double Q-Learning の効果**
-   通常の Q-learning は `max` 演算により確率的環境で過大評価バイアスを持つ。
-   Double Q はこのバイアスを除去するため、ノイズに頑健な方策を学ぶ。
+| 箇所 | 工夫 | 理由 |
+|------|------|------|
+| EpsilonGreedy | 同点 argmax でランダム選択 | 特定行動への偏りを回避 |
+| Boltzmann | log-sum-exp で安定化 | 大きな Q 値でのオーバーフロー防止 |
+| UCB1 | 未試行行動を ∞ ボーナスで優先 | 全 (s,a) ペアを保証的に試行 |
+| DoubleQ | QA/QB 交互更新 | 理論的に正しい不偏推定 |
+| Trainer | 複数 seed で平均 ± 標準偏差 | 統計的に信頼できる比較 |
 
-3. **Dyna-Q のサンプル効率**
-   実環境のサンプル 1 つにつき n_planning 回の擬似更新を行うことで、
-   実エピソード数が同じでも収束が速い。
+---
 
-## 精度を最優先する設計選択
+## 依存ライブラリ
 
-| 箇所 | 採用した工夫 | 理由 |
-|------|-------------|------|
-| EpsilonGreedy | 同点処理で argmax 候補からランダム選択 | 行動選択の偏り回避 |
-| Boltzmann | log-sum-exp で安定化 | overflow 回避 |
-| UCB1 | 未試行の行動を優先 (∞ ボーナス) | 全ての (s,a) を保証的に試行 |
-| DoubleQ | 平均値ではなく交互更新を直接実装 | 理論的に正しい不偏推定 |
-| Trainer | 複数 seed の平均 ± 標準偏差 | 統計的に信頼できる比較 |
+```
+numpy のみ（外部ライブラリ不要）
+Python 3.x
+```

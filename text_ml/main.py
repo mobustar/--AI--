@@ -21,8 +21,8 @@ from metrics    import accuracy, classification_report
 
 # ─── 比較する戦略の組み合わせ ────────────────────────────────
 TOKENIZERS  = ["whitespace", "char_ngram", "regex", "char"]
-VECTORIZERS = ["count", "tfidf", "hashing"]
-CLASSIFIERS = ["nb", "logreg", "svm", "knn"]
+VECTORIZERS = ["count", "tfidf", "hashing", "bm25"]
+CLASSIFIERS = ["nb", "logreg", "svm", "knn", "perceptron", "ridge"]
 
 
 def build_pipeline(tok_name: str, vec_name: str, clf_name: str):

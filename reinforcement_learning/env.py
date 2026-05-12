@@ -182,12 +182,70 @@ class StochasticGrid(BaseEnv):
         return self._encode(self.pos), 0.0, False
 
 
+# ─── 4. Windy GridWorld (Sutton & Barto Example 6.5) ─────────
+class WindyGridWorld(BaseEnv):
+    """
+    風のある格子世界 (Sutton & Barto Example 6.5)。
+
+    7×10 の格子。各列に「風」が設定されており、
+    エージェントが行動するたびに風の強さ分だけ上方向 (row 減少) に押される。
+
+    ┌──┬──┬──┬──┬──┬──┬──┬──┬──┬──┐
+    │  │  │  │  │  │  │  │  │  │  │  row 0
+    │  │  │  │  │  │  │  │  │  │  │  row 1
+    │  │  │  │  │  │  │  │  │  │  │  row 2
+    │ S│  │  │  │  │  │  │ G│  │  │  row 3
+    │  │  │  │  │  │  │  │  │  │  │  row 4
+    │  │  │  │  │  │  │  │  │  │  │  row 5
+    │  │  │  │  │  │  │  │  │  │  │  row 6
+    └──┴──┴──┴──┴──┴──┴──┴──┴──┴──┘
+    風(列): 0  0  0  1  1  1  2  2  1  0
+
+    各ステップ: −1 の報酬 / ゴール到達でエピソード終了
+    """
+
+    H, W   = 7, 10
+    START  = (3, 0)
+    GOAL   = (3, 7)
+    WIND   = [0, 0, 0, 1, 1, 1, 2, 2, 1, 0]
+    ACTIONS = [(-1, 0), (0, 1), (1, 0), (0, -1)]
+
+    def __init__(self, max_steps: int = 500):
+        self.max_steps = max_steps
+
+    @property
+    def n_states(self) -> int:
+        return self.H * self.W
+
+    def reset(self) -> int:
+        self.pos    = self.START
+        self._steps = 0
+        return self._encode(self.pos)
+
+    def _encode(self, pos):
+        return pos[0] * self.W + pos[1]
+
+    def step(self, action: int):
+        self._steps += 1
+        dy, dx = self.ACTIONS[action]
+        wind = self.WIND[self.pos[1]]
+        ny = int(np.clip(self.pos[0] + dy - wind, 0, self.H - 1))
+        nx = int(np.clip(self.pos[1] + dx,        0, self.W - 1))
+        self.pos = (ny, nx)
+        if self.pos == self.GOAL:
+            return self._encode(self.pos), -1.0, True
+        if self._steps >= self.max_steps:
+            return self._encode(self.pos), -1.0, True
+        return self._encode(self.pos), -1.0, False
+
+
 # ─── ファクトリ関数 ─────────────────────────────────────────
 def get_env(name: str = "gridworld", **kwargs) -> BaseEnv:
     table = {
         "gridworld":  GridWorld,
         "cliffwalk":  CliffWalk,
         "stochastic": StochasticGrid,
+        "windy":      WindyGridWorld,
     }
     if name not in table:
         raise ValueError(f"unknown env: {name}")

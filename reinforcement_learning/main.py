@@ -17,9 +17,10 @@ from trainer   import train_and_evaluate
 
 
 # ─── 比較する戦略 ───────────────────────────────────────────
-ENVS       = ["gridworld", "cliffwalk", "stochastic"]
+ENVS       = ["gridworld", "cliffwalk", "stochastic", "windy"]
 POLICIES   = ["eps", "decay_eps", "boltzmann", "ucb"]
-ALGORITHMS = ["mc", "sarsa", "q", "esarsa", "double_q", "dyna_q"]
+ALGORITHMS = ["mc", "sarsa", "q", "esarsa", "double_q", "dyna_q",
+              "n_step_sarsa", "sarsa_lambda"]
 
 
 def make_factories(env_name, pol_name, algo_name):
@@ -56,6 +57,12 @@ def make_factories(env_name, pol_name, algo_name):
         if algo_name == "dyna_q":
             return get_algorithm(algo_name, n_states, n_actions,
                                  **common, n_planning=10, seed=seed)
+        if algo_name == "n_step_sarsa":
+            return get_algorithm(algo_name, n_states, n_actions,
+                                 **common, n=4)
+        if algo_name == "sarsa_lambda":
+            return get_algorithm(algo_name, n_states, n_actions,
+                                 **common, lam=0.8)
         return get_algorithm(algo_name, n_states, n_actions, **common)
 
     return env_factory, policy_factory, algo_factory
@@ -99,6 +106,8 @@ def run_recommended():
         ("cliffwalk",  "decay_eps", "q"),
         # 確率的: Double Q-Learning は最大化バイアスを除去できる
         ("stochastic", "decay_eps", "double_q"),
+        # 風あり格子: SARSA(λ) が credit assignment を長く伝播させ収束が安定
+        ("windy",      "decay_eps", "sarsa_lambda"),
     ]
     print("\n=== 推奨構成 (各環境ごとに報酬最大化を優先) ===")
     for env_name, pol_name, algo_name in recommendations:

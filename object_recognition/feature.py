@@ -201,6 +201,65 @@ class EdgeHist(BaseFeature):
         return np.stack(feats)
 
 
+# ─── 5. DCT (Discrete Cosine Transform) ─────────────────────
+class DCT(BaseFeature):
+    """
+    離散コサイン変換 (DCT-II) の低周波係数を特徴とする。
+    JPEG 圧縮と同じ変換で、少ない係数で画像の主要情報を表現できる。
+
+    手順:
+      1. H×W 画像に 2D DCT-II を適用: F = D_H I D_W^T
+         D_H[k,n] = sqrt(2/H) cos(πk(2n+1)/(2H))   k>0
+         D_H[0,n] = sqrt(1/H)
+      2. ジグザグスキャンで低周波成分を優先して n_components 個抽出
+
+    精度の傾向:
+      形状よりも明暗・テクスチャのパターンを捉える。
+      HOG・EdgeHist より低精度だが独立した情報を持つ。
+    """
+
+    def __init__(self, n_components: int = 32):
+        self.n_components = n_components
+        self._dct_cache: dict = {}
+
+    def _dct_matrix(self, N: int) -> np.ndarray:
+        if N not in self._dct_cache:
+            n = np.arange(N)
+            k = np.arange(N)
+            D = np.cos(np.pi * k[:, None] * (2 * n[None, :] + 1) / (2 * N))
+            D[0] /= np.sqrt(2)
+            D *= np.sqrt(2.0 / N)
+            self._dct_cache[N] = D
+        return self._dct_cache[N]
+
+    def _zigzag(self, H: int, W: int) -> np.ndarray:
+        """対角線をジグザグに走査したときのフラット化インデックスを返す"""
+        indices = []
+        for s in range(H + W - 1):
+            if s % 2 == 0:
+                r, c = min(s, H - 1), max(0, s - (H - 1))
+                while r >= 0 and c < W:
+                    indices.append(r * W + c)
+                    r -= 1; c += 1
+            else:
+                r, c = max(0, s - (W - 1)), min(s, W - 1)
+                while r < H and c >= 0:
+                    indices.append(r * W + c)
+                    r += 1; c -= 1
+        return np.array(indices)
+
+    def extract(self, images: np.ndarray) -> np.ndarray:
+        _, H, W = images.shape
+        D_H = self._dct_matrix(H)
+        D_W = self._dct_matrix(W)
+        zz  = self._zigzag(H, W)[:self.n_components]
+        feats = []
+        for img in images:
+            F = D_H @ img.astype(np.float64) @ D_W.T
+            feats.append(F.ravel()[zz].astype(np.float32))
+        return np.stack(feats)
+
+
 # ─── ファクトリ関数 ─────────────────────────────────────────
 def get_feature(name: str = "hog", **kwargs) -> BaseFeature:
     table = {
@@ -208,6 +267,7 @@ def get_feature(name: str = "hog", **kwargs) -> BaseFeature:
         "hog":      HOG,
         "lbp":      LBP,
         "edge":     EdgeHist,
+        "dct":      DCT,
     }
     if name not in table:
         raise ValueError(f"unknown feature: {name}")

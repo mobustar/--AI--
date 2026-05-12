@@ -286,16 +286,145 @@ class DynaQ(BaseAlgorithm):
         return rewards
 
 
+# ─── 7. n-step SARSA ────────────────────────────────────────
+class NStepSARSA(BaseAlgorithm):
+    """
+    n-step SARSA (Sutton & Barto 7.2 章)。
+
+    n ステップ先まで実際の報酬を展開してから Q を更新する。
+
+    n-step リターン:
+        G_{t:t+n} = Σ_{k=0}^{n-1} γ^k r_{t+k+1}  +  γ^n Q(s_{t+n}, a_{t+n})
+                    ※ 終端ステップ以降は Q=0
+
+    更新:
+        Q(s_t, a_t) ← Q(s_t, a_t) + α [G_{t:t+n} − Q(s_t, a_t)]
+
+    n=1 のとき SARSA と等価。
+    n が大きいほど MC に近づき、バイアスが減って分散が増す。
+    """
+
+    def __init__(self, n_states, n_actions, alpha=0.1, gamma=0.95, n: int = 4):
+        super().__init__(n_states, n_actions, alpha, gamma)
+        self.n = n
+
+    def train(self, env: BaseEnv, policy: BasePolicy, n_episodes: int) -> List[float]:
+        rewards_list = []
+        M = self.n + 1   # リングバッファサイズ
+
+        for _ in range(n_episodes):
+            s0 = env.reset()
+            a0 = policy.select(self.Q, s0)
+
+            states  = [0]   * M
+            actions = [0]   * M
+            rews    = [0.0] * M
+            states[0]  = s0
+            actions[0] = a0
+
+            T     = float("inf")
+            t     = 0
+            total = 0.0
+
+            while True:
+                if t < T:
+                    ns, r, done = env.step(actions[t % M])
+                    total += r
+                    rews[(t + 1) % M]   = r
+                    states[(t + 1) % M] = ns
+                    if done:
+                        T = t + 1
+                    else:
+                        actions[(t + 1) % M] = policy.select(self.Q, ns)
+
+                tau = t - self.n + 1
+                if tau >= 0:
+                    t_cap = int(T) if T != float("inf") else t + 1
+                    G = sum(
+                        (self.gamma ** (i - tau - 1)) * rews[i % M]
+                        for i in range(tau + 1, min(tau + self.n, t_cap) + 1)
+                    )
+                    if T == float("inf") or tau + self.n < int(T):
+                        G += (self.gamma ** self.n) * self.Q[
+                            states[(tau + self.n) % M],
+                            actions[(tau + self.n) % M],
+                        ]
+                    s_tau = states[tau % M]
+                    a_tau = actions[tau % M]
+                    self.Q[s_tau, a_tau] += self.alpha * (G - self.Q[s_tau, a_tau])
+
+                if tau == T - 1:
+                    break
+                t += 1
+
+            rewards_list.append(total)
+            policy.on_episode_end()
+        return rewards_list
+
+
+# ─── 8. SARSA(λ) — 適格性トレース ────────────────────────────
+class SARSALambda(BaseAlgorithm):
+    """
+    SARSA(λ): 適格性トレース (eligibility traces) 付き SARSA。
+
+    適格性トレース e(s,a) は過去に通過した (s,a) ペアの「責任度」を表し、
+    TD 誤差 δ を全 (s,a) に e(s,a) の重みで一括伝播させる。
+
+    Accumulating traces (蓄積型):
+        e(s_t, a_t) ← γλ e(s_t, a_t) + 1   （訪問時は 1 を加算）
+
+    TD 誤差と更新:
+        δ = r  +  γ Q(s', a')  −  Q(s, a)
+        Q(s, a) ← Q(s, a)  +  α δ e(s, a)   for all (s, a)
+        e(s, a) ← γλ e(s, a)                 for all (s, a)
+
+    λ=0 : SARSA(0) と等価 (ブートストラップのみ)
+    λ=1 : Monte Carlo に近い動作 (長い credit assignment)
+    """
+
+    def __init__(self, n_states, n_actions, alpha=0.1, gamma=0.95, lam: float = 0.8):
+        super().__init__(n_states, n_actions, alpha, gamma)
+        self.lam = lam
+
+    def train(self, env: BaseEnv, policy: BasePolicy, n_episodes: int) -> List[float]:
+        rewards = []
+        for _ in range(n_episodes):
+            e      = np.zeros((self.n_states, self.n_actions))
+            state  = env.reset()
+            action = policy.select(self.Q, state)
+            done   = False
+            total  = 0.0
+
+            while not done:
+                ns, r, done = env.step(action)
+                na = 0 if done else policy.select(self.Q, ns)
+
+                delta = r + (0.0 if done else self.gamma * self.Q[ns, na]) - self.Q[state, action]
+                e[state, action] += 1.0          # accumulating traces
+
+                self.Q += self.alpha * delta * e
+                e      *= self.gamma * self.lam
+
+                state, action = ns, na
+                total += r
+
+            rewards.append(total)
+            policy.on_episode_end()
+        return rewards
+
+
 # ─── ファクトリ関数 ─────────────────────────────────────────
 def get_algorithm(name: str, n_states: int, n_actions: int,
                   **kwargs) -> BaseAlgorithm:
     table = {
-        "mc":       MonteCarlo,
-        "sarsa":    SARSA,
-        "q":        QLearning,
-        "esarsa":   ExpectedSARSA,
-        "double_q": DoubleQLearning,
-        "dyna_q":   DynaQ,
+        "mc":           MonteCarlo,
+        "sarsa":        SARSA,
+        "q":            QLearning,
+        "esarsa":       ExpectedSARSA,
+        "double_q":     DoubleQLearning,
+        "dyna_q":       DynaQ,
+        "n_step_sarsa": NStepSARSA,
+        "sarsa_lambda": SARSALambda,
     }
     if name not in table:
         raise ValueError(f"unknown algorithm: {name}")

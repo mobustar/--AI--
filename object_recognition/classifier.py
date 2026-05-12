@@ -298,6 +298,103 @@ class MLPClassifier(BaseClassifier):
         return self.classes_[Z2.argmax(axis=1)]
 
 
+# ─── 5. Gaussian Naive Bayes ────────────────────────────────
+class GaussianNBClassifier(BaseClassifier):
+    """
+    ガウシアンナイーブベイズ。連続値特徴に適した確率的分類器。
+
+    各特徴 j がクラスごとに独立なガウス分布に従うと仮定:
+        P(x_j | y=c) = N(x_j ; μ_{cj}, σ²_{cj})
+
+    対数事後確率 (log-sum-exp で安定化):
+        log P(y=c | x) ∝ log P(c)
+            − 0.5 Σ_j [log(2π σ²_{cj}) + (x_j − μ_{cj})² / σ²_{cj}]
+
+    var_smoothing: 全クラスの最大分散に比例した値を各分散に加算し
+                  ゼロ分散を防ぐ。
+    """
+
+    def __init__(self, var_smoothing: float = 1e-9):
+        self.var_smoothing = var_smoothing
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y)
+        self.classes_ = np.unique(y)
+        means, sigmas, log_priors = [], [], []
+        for c in self.classes_:
+            X_c = X[y == c]
+            means.append(X_c.mean(axis=0))
+            sigmas.append(X_c.var(axis=0))
+            log_priors.append(np.log(len(X_c) / len(X)))
+        self.means_      = np.stack(means)                    # (K, d)
+        self.sigmas_     = np.stack(sigmas)                   # (K, d)
+        self.sigmas_    += self.var_smoothing * self.sigmas_.max()
+        self.log_prior_  = np.array(log_priors)               # (K,)
+        return self
+
+    def predict(self, X):
+        X = np.asarray(X, dtype=np.float64)
+        K = len(self.classes_)
+        log_prob = np.empty((X.shape[0], K))
+        for i in range(K):
+            diff = X - self.means_[i]
+            log_prob[:, i] = (
+                self.log_prior_[i]
+                - 0.5 * np.sum(np.log(2 * np.pi * self.sigmas_[i]))
+                - 0.5 * np.sum(diff ** 2 / self.sigmas_[i], axis=1)
+            )
+        return self.classes_[log_prob.argmax(axis=1)]
+
+
+# ─── 6. Linear Discriminant Analysis ────────────────────────
+class LDAClassifier(BaseClassifier):
+    """
+    線形判別分析 (Fisher の LDA)。
+
+    クラス内散布行列 Σ_W を用いた線形判別関数:
+        δ_c(x) = x^T Σ_W^{-1} μ_c − 0.5 μ_c^T Σ_W^{-1} μ_c + log P(c)
+
+    Σ_W = Σ_c Σ_{x∈C_c} (x − μ_c)(x − μ_c)^T   (クラス内散布行列)
+
+    ŷ = argmax_c δ_c(x)
+
+    reg: Σ_W が特異行列になる場合の正則化係数 (reg × I を加算)。
+    """
+
+    def __init__(self, reg: float = 1e-4):
+        self.reg = reg
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y)
+        self.classes_ = np.unique(y)
+        N, d = X.shape
+        S_W    = np.zeros((d, d))
+        means, priors = [], []
+        for c in self.classes_:
+            X_c  = X[y == c]
+            mu_c = X_c.mean(axis=0)
+            means.append(mu_c)
+            priors.append(len(X_c) / N)
+            diff = X_c - mu_c
+            S_W += diff.T @ diff
+        self.means_  = np.stack(means)       # (K, d)
+        self.priors_ = np.array(priors)      # (K,)
+        S_W_inv      = np.linalg.pinv(S_W + self.reg * np.eye(d))
+        # W[:, c] = S_W_inv @ mu_c  →  scores = X @ W + bias
+        self.W_    = S_W_inv @ self.means_.T                              # (d, K)
+        self.bias_ = (
+            -0.5 * np.einsum("kd,dk->k", self.means_, self.W_)
+            + np.log(self.priors_)
+        )
+        return self
+
+    def predict(self, X):
+        X = np.asarray(X, dtype=np.float64)
+        return self.classes_[(X @ self.W_ + self.bias_).argmax(axis=1)]
+
+
 # ─── ファクトリ関数 ─────────────────────────────────────────
 def get_classifier(name: str = "softmax", **kwargs) -> BaseClassifier:
     table = {
@@ -305,6 +402,8 @@ def get_classifier(name: str = "softmax", **kwargs) -> BaseClassifier:
         "softmax": SoftmaxRegression,
         "svm":     OvRLinearSVM,
         "mlp":     MLPClassifier,
+        "gnb":     GaussianNBClassifier,
+        "lda":     LDAClassifier,
     }
     if name not in table:
         raise ValueError(f"unknown classifier: {name}")

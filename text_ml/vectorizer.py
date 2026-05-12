@@ -207,16 +207,83 @@ class HashingVectorizer(BaseVectorizer):
         return self._n_features
 
 
+# ─── 4. BM25 ────────────────────────────────────────────────
+class BM25Vectorizer(BaseVectorizer):
+    """
+    Okapi BM25 によるベクトル化。TF-IDF の改良版。
+
+    TF の飽和処理と文書長正規化を同時に行う:
+
+        IDF(t)       = log( (N − DF(t) + 0.5) / (DF(t) + 0.5)  +  1 )
+                       ※ Robertson IDF: 常に正値
+
+        TF_BM25(t,d) = TF(t,d) × (k1 + 1)
+                       ────────────────────────────────────────────
+                       TF(t,d) + k1 × (1 − b + b × |d| / avgdl)
+
+        BM25(t,d)    = IDF(t) × TF_BM25(t,d)
+
+    TF-IDF との違い:
+      ・TF が増えても BM25 スコアは k1+1 に漸近する (飽和効果)
+      ・avgdl との比率で文書長を正規化 (b=0: 正規化なし、b=1: 完全正規化)
+    """
+
+    def __init__(self, min_df: int = 1, k1: float = 1.5, b: float = 0.75):
+        self.min_df = min_df
+        self.k1     = k1
+        self.b      = b
+        self.vocab_:  Dict[str, int] = {}
+        self.idf_:    np.ndarray     = None
+        self.avgdl_:  float          = 1.0
+
+    def fit(self, token_lists: List[List[str]]):
+        n_docs = len(token_lists)
+        df     = Counter()
+        lengths = []
+        for tokens in token_lists:
+            lengths.append(len(tokens))
+            for t in set(tokens):
+                df[t] += 1
+        self.avgdl_ = float(np.mean(lengths)) if lengths else 1.0
+        kept = sorted(t for t, c in df.items() if c >= self.min_df)
+        self.vocab_ = {t: i for i, t in enumerate(kept)}
+        idf = np.zeros(len(self.vocab_))
+        for t, j in self.vocab_.items():
+            idf[j] = np.log((n_docs - df[t] + 0.5) / (df[t] + 0.5) + 1.0)
+        self.idf_ = idf
+        return self
+
+    def transform(self, token_lists: List[List[str]]) -> np.ndarray:
+        n_docs  = len(token_lists)
+        n_feats = len(self.vocab_)
+        X = np.zeros((n_docs, n_feats), dtype=np.float64)
+        for i, tokens in enumerate(token_lists):
+            dl = max(len(tokens), 1)
+            tf_map = Counter(tokens)
+            for t, tf in tf_map.items():
+                j = self.vocab_.get(t)
+                if j is None:
+                    continue
+                denom = tf + self.k1 * (1.0 - self.b + self.b * dl / max(self.avgdl_, 1.0))
+                X[i, j] = self.idf_[j] * tf * (self.k1 + 1.0) / denom
+        return X
+
+    @property
+    def n_features(self) -> int:
+        return len(self.vocab_)
+
+
 # ─── ファクトリ関数 ─────────────────────────────────────────
 def get_vectorizer(name: str = "tfidf", **kwargs) -> BaseVectorizer:
     """
     名前で Vectorizer を取得する
-        name in {"count", "tfidf", "hashing"}
+        name in {"count", "tfidf", "hashing", "bm25"}
     """
     table = {
         "count":   CountVectorizer,
         "tfidf":   TfIdfVectorizer,
         "hashing": HashingVectorizer,
+        "bm25":    BM25Vectorizer,
     }
     if name not in table:
         raise ValueError(f"unknown vectorizer: {name}")

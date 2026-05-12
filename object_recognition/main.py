@@ -19,8 +19,8 @@ from metrics    import accuracy, classification_report
 
 
 PREPROCESSORS = ["noop", "minmax", "standard", "hist"]
-FEATURES      = ["raw", "hog", "lbp", "edge"]
-CLASSIFIERS   = ["knn", "softmax", "svm", "mlp"]
+FEATURES      = ["raw", "hog", "lbp", "edge", "dct"]
+CLASSIFIERS   = ["knn", "softmax", "svm", "mlp", "gnb", "lda"]
 
 
 def build_pipeline(prep_name: str, feat_name: str, clf_name: str):

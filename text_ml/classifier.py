@@ -298,17 +298,111 @@ class KNNClassifier(BaseClassifier):
         return preds
 
 
+# ─── 5. Averaged Perceptron ─────────────────────────────────
+class AveragedPerceptron(BaseClassifier):
+    """
+    平均化パーセプトロン (Freund & Schapire 1999)。
+
+    オンライン学習で誤分類のたびに重みを更新し、
+    全ステップの平均を最終重みとして使う。
+
+    更新 (y_pm ∈ {−1, +1}):
+        ŷ = sign(w · x + b)
+        if ŷ ≠ y_pm:
+            w ← w + y_pm · x
+            b ← b + y_pm
+
+    最終重み (平均化):
+        w_final = (1/T) Σ_{t=1}^{T} w_t   （T = 総ステップ数）
+
+    利点:
+      - 1 パス学習で収束が速い
+      - 平均化により汎化性能が向上し SVM に近い精度を出す
+    """
+
+    def __init__(self, epochs: int = 30, seed: int = 0):
+        self.epochs = epochs
+        self.seed   = seed
+
+    def fit(self, X, y):
+        X    = np.asarray(X, dtype=np.float64)
+        y_pm = np.where(np.asarray(y) == 1, 1.0, -1.0)
+        n, d = X.shape
+        rng  = np.random.default_rng(self.seed)
+        w, b = np.zeros(d), 0.0
+        w_avg, b_avg, t = np.zeros(d), 0.0, 0
+        for _ in range(self.epochs):
+            for i in rng.permutation(n):
+                t += 1
+                if y_pm[i] * (X[i] @ w + b) <= 0:
+                    w += y_pm[i] * X[i]
+                    b += y_pm[i]
+                w_avg += w
+                b_avg += b
+        self.w_ = w_avg / t
+        self.b_ = b_avg / t
+        return self
+
+    def predict(self, X):
+        X = np.asarray(X, dtype=np.float64)
+        return (X @ self.w_ + self.b_ >= 0).astype(int)
+
+
+# ─── 6. Ridge Classifier ────────────────────────────────────
+class RidgeClassifier(BaseClassifier):
+    """
+    リッジ回帰による分類器。閉形式解を持つ。
+
+    最小化問題:
+        min_{w,b}  ‖y − (Xb w + b)‖²  +  α ‖w‖²
+        ※ y ∈ {0, 1}、出力 ≥ 0.5 を正例と判定
+
+    バイアス項を含む双対形式 (n < d のとき O(n²d + n³) で高効率):
+        X̃ = [X, 1] ∈ ℝ^{n×(d+1)}
+        K = X̃ X̃^T + α I   (n×n)
+        θ = X̃^T K^{-1} y  (d+1,)
+
+    利点:
+      - 反復なしの閉形式解 → 訓練が瞬時
+      - L2 正則化で滑らかな決定境界を学習
+    欠点:
+      - 確率値を出力しない
+      - 特徴次元が非常に大きいと K 計算がメモリ集約的になる
+    """
+
+    def __init__(self, alpha: float = 1.0):
+        self.alpha = alpha
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        N = X.shape[0]
+        Xb    = np.column_stack([X, np.ones(N)])          # (N, d+1)
+        K     = Xb @ Xb.T + self.alpha * np.eye(N)        # (N, N) 双対カーネル
+        a     = np.linalg.solve(K, y)                      # (N,)
+        theta = Xb.T @ a                                   # (d+1,)
+        self.w_ = theta[:-1]
+        self.b_ = theta[-1]
+        return self
+
+    def predict(self, X):
+        X = np.asarray(X, dtype=np.float64)
+        return (X @ self.w_ + self.b_ >= 0.5).astype(int)
+
+
 # ─── ファクトリ関数 ─────────────────────────────────────────
 def get_classifier(name: str = "logreg", **kwargs) -> BaseClassifier:
     """
     名前で Classifier を取得する
-        name in {"nb", "logreg", "svm", "knn"}
+        name in {"nb", "logreg", "svm", "knn", "perceptron", "ridge"}
     """
     table = {
-        "nb":      MultinomialNB,
-        "logreg":  LogisticRegression,
-        "svm":     LinearSVM,
-        "knn":     KNNClassifier,
+        "nb":         MultinomialNB,
+        "logreg":     LogisticRegression,
+        "svm":        LinearSVM,
+        "knn":        KNNClassifier,
+        "perceptron": AveragedPerceptron,
+        "ridge":      RidgeClassifier,
     }
     if name not in table:
         raise ValueError(f"unknown classifier: {name}")

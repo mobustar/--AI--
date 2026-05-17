@@ -346,22 +346,87 @@ standard  hog       lda               0.921
 ### 1 つの構成だけ試す
 
 ```python
-from data       import make_shapes, train_test_split
-from preprocess import get_preprocessor
-from feature    import get_feature
-from classifier import get_classifier
-from pipeline   import ObjectRecognitionPipeline
+import numpy as np
 
-ds = make_shapes(n_per_class=200, size=24, noise=0.08, seed=0)
-train, test = train_test_split(ds, ratio=0.8, seed=1)
+# --- 図形データ生成 (circle / square / triangle) ---
+def make_shapes(n_per_class=200, size=24, noise=0.08, seed=0):
+    rng = np.random.default_rng(seed)
+    imgs, lbls = [], []
+    cx = cy = size // 2
+    r  = size // 4
+    for lbl, shape in enumerate(["circle", "square", "triangle"]):
+        for _ in range(n_per_class):
+            img = np.zeros((size, size))
+            if shape == "circle":
+                ys, xs = np.ogrid[:size, :size]
+                img[(ys-cx)**2 + (xs-cy)**2 <= r**2] = 1.0
+            elif shape == "square":
+                img[cx-r:cx+r, cy-r:cy+r] = 1.0
+            else:
+                for i in range(size):
+                    h = i - (cx - r)
+                    if 0 <= h <= 2*r:
+                        w = int(h * r / (2*r))
+                        img[i, cy-w:cy+w+1] = 1.0
+            img = np.clip(img + rng.normal(0, noise, img.shape), 0, 1)
+            imgs.append(img); lbls.append(lbl)
+    idx = rng.permutation(len(lbls))
+    return np.array(imgs)[idx], np.array(lbls)[idx]
 
-pipe = ObjectRecognitionPipeline(
-    preprocessor = get_preprocessor("standard"),
-    feature      = get_feature("hog"),
-    classifier   = get_classifier("softmax"),
-)
-pipe.fit(train.images, train.labels)
-preds = pipe.predict(test.images)
+# --- HOG 特徴抽出 ---
+def hog_features(img, cell=4, bins=9):
+    gy = np.zeros_like(img); gx = np.zeros_like(img)
+    gy[1:-1, :] = img[2:, :] - img[:-2, :]
+    gx[:, 1:-1] = img[:, 2:] - img[:, :-2]
+    mag = np.sqrt(gx**2 + gy**2)
+    ang = np.arctan2(gy, gx) % np.pi
+    h, w = img.shape
+    feat = []
+    for ri in range(0, h - cell + 1, cell):
+        for ci in range(0, w - cell + 1, cell):
+            hist, _ = np.histogram(
+                ang[ri:ri+cell, ci:ci+cell].ravel(), bins=bins,
+                range=(0, np.pi), weights=mag[ri:ri+cell, ci:ci+cell].ravel())
+            feat.extend(hist)
+    feat = np.array(feat, dtype=float)
+    return feat / (np.linalg.norm(feat) + 1e-8)
+
+# --- Softmax 分類器 ---
+class Softmax:
+    def fit(self, X, y, lr=0.05, epochs=300, reg=1e-3):
+        n, d = X.shape; k = len(np.unique(y))
+        self.W = np.zeros((k, d)); self.b = np.zeros(k)
+        Y = np.eye(k)[y]
+        for _ in range(epochs):
+            z = X @ self.W.T + self.b
+            z -= z.max(1, keepdims=True)
+            p = np.exp(z) / np.exp(z).sum(1, keepdims=True)
+            self.W -= lr * ((p - Y).T @ X / n + reg * self.W)
+            self.b -= lr * (p - Y).mean(0)
+    def predict(self, X):
+        return (X @ self.W.T + self.b).argmax(1)
+
+# --- 実行 ---
+images, labels = make_shapes(n_per_class=200, size=24, noise=0.08, seed=0)
+X = np.array([hog_features(img) for img in images])
+
+split = int(len(labels) * 0.8)
+X_train, y_train = X[:split], labels[:split]
+X_test,  y_test  = X[split:], labels[split:]
+
+# 標準化 (訓練データの統計をテストにも適用)
+mu, sigma = X_train.mean(0), X_train.std(0) + 1e-8
+X_train = (X_train - mu) / sigma
+X_test  = (X_test  - mu) / sigma
+
+clf = Softmax()
+clf.fit(X_train, y_train)
+preds = clf.predict(X_test)
+
+NAMES = ["circle", "square", "triangle"]
+print(f"正解率: {np.mean(preds == y_test):.1%}")
+for true, pred in zip(y_test[:5], preds[:5]):
+    print(f"  {'○' if true==pred else '×'} 真={NAMES[true]} / 予={NAMES[pred]}")
 ```
 
 ---
@@ -371,8 +436,16 @@ preds = pipe.predict(test.images)
 ### 課題 1: HOG のセルサイズを変える
 
 ```python
-feat = get_feature("hog", cell_size=2)  # 細かく分割
-feat = get_feature("hog", cell_size=8)  # 粗く分割
+# 上の make_shapes / hog_features / Softmax / mu,sigma の定義に続けて実行
+print("HOG セルサイズの比較:")
+for cell in [2, 4, 8]:
+    X = np.array([hog_features(img, cell=cell) for img in images])
+    mu, sigma = X[:split].mean(0), X[:split].std(0) + 1e-8
+    Xtr = (X[:split] - mu) / sigma
+    Xte = (X[split:] - mu) / sigma
+    clf = Softmax(); clf.fit(Xtr, y_train)
+    acc = np.mean(clf.predict(Xte) == y_test)
+    print(f"  cell={cell} → 特徴次元={X.shape[1]:4d}, 正解率={acc:.1%}")
 ```
 
 小さいセルサイズ → 位置情報が細かい / ノイズに弱い  
@@ -381,8 +454,18 @@ feat = get_feature("hog", cell_size=8)  # 粗く分割
 ### 課題 2: ノイズの影響を調べる
 
 ```python
-ds_clean = make_shapes(noise=0.0)   # ノイズなし
-ds_noisy = make_shapes(noise=0.2)   # ノイズ多め
+# 上の make_shapes / hog_features / Softmax の定義に続けて実行
+print("ノイズ量の比較:")
+for noise in [0.0, 0.1, 0.2]:
+    imgs, lbls = make_shapes(n_per_class=100, noise=noise, seed=0)
+    X = np.array([hog_features(img) for img in imgs])
+    sp = int(len(lbls) * 0.8)
+    mu, sigma = X[:sp].mean(0), X[:sp].std(0) + 1e-8
+    Xtr = (X[:sp] - mu) / sigma
+    Xte = (X[sp:] - mu) / sigma
+    clf = Softmax(); clf.fit(Xtr, lbls[:sp])
+    acc = np.mean(clf.predict(Xte) == lbls[sp:])
+    print(f"  noise={noise:.1f} → 正解率={acc:.1%}")
 ```
 
 どの前処理+特徴の組み合わせがノイズに最も頑健か比較する。
@@ -391,26 +474,88 @@ ds_noisy = make_shapes(noise=0.2)   # ノイズ多め
 
 ```python
 import numpy as np
-from feature import HOG
 
-hog = HOG()
-img = ds.images[0]
-gy, gx = hog._gradients(img)
+# 上の make_shapes の定義に続けて実行 (または単独で動作)
+def make_shapes(n_per_class=10, size=24, noise=0.0, seed=0):
+    rng = np.random.default_rng(seed)
+    imgs, lbls = [], []
+    cx = cy = size // 2; r = size // 4
+    for lbl, shape in enumerate(["circle", "square", "triangle"]):
+        for _ in range(n_per_class):
+            img = np.zeros((size, size))
+            if shape == "circle":
+                ys, xs = np.ogrid[:size, :size]
+                img[(ys-cx)**2 + (xs-cy)**2 <= r**2] = 1.0
+            elif shape == "square":
+                img[cx-r:cx+r, cy-r:cy+r] = 1.0
+            else:
+                for i in range(size):
+                    h = i - (cx - r)
+                    if 0 <= h <= 2*r:
+                        w = int(h * r / (2*r))
+                        img[i, cy-w:cy+w+1] = 1.0
+            img = np.clip(img + rng.normal(0, noise, img.shape), 0, 1)
+            imgs.append(img); lbls.append(lbl)
+    return np.array(imgs), np.array(lbls)
+
+images, _ = make_shapes(n_per_class=1, noise=0.0)
+img = images[0]
+
+# 勾配計算 (中央差分)
+gy = np.zeros_like(img); gx = np.zeros_like(img)
+gy[1:-1, :] = img[2:, :] - img[:-2, :]
+gx[:, 1:-1] = img[:, 2:] - img[:, :-2]
 mag = np.sqrt(gx**2 + gy**2)
 
-import matplotlib.pyplot as plt
-fig, axes = plt.subplots(1, 3)
-axes[0].imshow(img, cmap='gray')
-axes[1].imshow(np.abs(gx), cmap='hot')
-axes[2].imshow(mag, cmap='hot')
-plt.show()
+def ascii_heatmap(arr, rows=12):
+    h, w = arr.shape
+    step = max(1, h // rows)
+    chars = " .,:;+*#@"
+    vmax = arr.max() + 1e-8
+    lines = []
+    for r in range(0, h, step):
+        line = ""
+        for c in range(w):
+            v = arr[r:r+step, c].mean()
+            line += chars[int(v / vmax * (len(chars) - 1))] * 2
+        lines.append(line)
+    return "\n".join(lines)
+
+print("=== 元画像 ===")
+print(ascii_heatmap(img))
+print("\n=== x方向勾配 |gx| ===")
+print(ascii_heatmap(np.abs(gx)))
+print("\n=== 勾配強度 mag ===")
+print(ascii_heatmap(mag))
+print(f"\n統計: img mean={img.mean():.3f} | gx abs_mean={np.abs(gx).mean():.3f} | mag mean={mag.mean():.3f}")
 ```
 
 ### 課題 4: DCT 係数の数を変える
 
 ```python
-feat_few  = get_feature("dct", n_components=8)   # 低周波のみ
-feat_many = get_feature("dct", n_components=64)  # 多めの係数
+# 上の make_shapes / Softmax の定義に続けて実行
+def dct_features(img, n_components=32):
+    h, w = img.shape
+    def dct_matrix(N):
+        k = np.arange(N); n = np.arange(N)
+        D = np.sqrt(2/N) * np.cos(np.pi * k[:, None] * (2*n[None,:]+1) / (2*N))
+        D[0, :] = np.sqrt(1/N)
+        return D
+    F = dct_matrix(h) @ img @ dct_matrix(w).T
+    zigzag = sorted([(i+j, i, j) for i in range(h) for j in range(w)])
+    return np.array([F[i, j] for _, i, j in zigzag[:n_components]])
+
+print("DCT 係数数の比較:")
+images, labels = make_shapes(n_per_class=100, size=24, noise=0.08, seed=0)
+sp = int(len(labels) * 0.8)
+for n in [8, 32, 64]:
+    X = np.array([dct_features(img, n) for img in images])
+    mu, sigma = X[:sp].mean(0), X[:sp].std(0) + 1e-8
+    Xtr = (X[:sp] - mu) / sigma
+    Xte = (X[sp:] - mu) / sigma
+    clf = Softmax(); clf.fit(Xtr, labels[:sp])
+    acc = np.mean(clf.predict(Xte) == labels[sp:])
+    print(f"  n_components={n:2d} → 正解率={acc:.1%}")
 ```
 
 係数が多すぎると高周波ノイズも取り込む → 精度が下がる場合がある。

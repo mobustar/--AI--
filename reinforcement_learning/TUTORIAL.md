@@ -381,25 +381,54 @@ decay_eps   sarsa_lambda  0.821     0.018
 ### 1 つの構成を試す
 
 ```python
-from env       import get_env
-from policy    import get_policy
-from algorithm import get_algorithm
-from trainer   import train_and_evaluate
+import numpy as np
 
-def env_factory(seed):
-    return get_env("gridworld")
+# --- 4x4 GridWorld 環境 ---
+class GridWorld:
+    H, W, GOAL = 4, 4, 15
+    ACTIONS = [(-1,0),(0,1),(1,0),(0,-1)]  # 上右下左
 
-def policy_factory(seed):
-    return get_policy("decay_eps", epsilon=1.0, decay=0.995, seed=seed)
+    def reset(self):
+        self.state = 0
+        return 0
 
-def algo_factory(n_states, n_actions, seed):
-    return get_algorithm("q", n_states, n_actions, alpha=0.1, gamma=0.95)
+    def step(self, a):
+        r, c = divmod(self.state, self.W)
+        dr, dc = self.ACTIONS[a]
+        self.state = max(0,min(self.H-1,r+dr))*self.W + max(0,min(self.W-1,c+dc))
+        done = (self.state == self.GOAL)
+        return self.state, (1.0 if done else -0.04), done
 
-mean, std, rewards = train_and_evaluate(
-    env_factory, policy_factory, algo_factory,
-    n_episodes=400, n_eval_episodes=30, n_seeds=3,
-)
-print(f"平均報酬: {mean:.3f} ± {std:.3f}")
+# --- Q-learning (減衰 ε-greedy) ---
+def train(n_episodes=400, alpha=0.1, gamma=0.95, eps_start=1.0, decay=0.995, seed=0):
+    env = GridWorld()
+    Q   = np.zeros((16, 4))
+    rng = np.random.default_rng(seed)
+    eps = eps_start
+    rewards = []
+    for _ in range(n_episodes):
+        s, total = env.reset(), 0.0
+        for _ in range(200):
+            a = rng.integers(4) if rng.random() < eps else Q[s].argmax()
+            ns, r, done = env.step(a)
+            Q[s, a] += alpha * (r + gamma * Q[ns].max() - Q[s, a])
+            s, total = ns, total + r
+            if done:
+                break
+        rewards.append(total)
+        eps = max(0.05, eps * decay)
+    return Q, rewards
+
+Q, rewards = train(n_episodes=400)
+mean_r = np.mean(rewards[-100:])
+std_r  = np.std(rewards[-100:])
+print(f"平均報酬 (最後100エピソード): {mean_r:.3f} ± {std_r:.3f}")
+
+# 最適方策を表示
+DIR = ["↑", "→", "↓", "←"]
+print("\n最適方策:")
+for r in range(4):
+    print(" ".join("G " if r*4+c == 15 else DIR[Q[r*4+c].argmax()]+" " for c in range(4)))
 ```
 
 ---
@@ -409,9 +438,30 @@ print(f"平均報酬: {mean:.3f} ± {std:.3f}")
 ### 課題 1: α (学習率) の影響
 
 ```python
+# 上の GridWorld クラス定義に続けて実行
+import numpy as np
+
+def run_sarsa(alpha, n_episodes=400, gamma=0.95, seed=0):
+    env, Q = GridWorld(), np.zeros((16, 4))
+    rng = np.random.default_rng(seed)
+    rewards = []
+    for _ in range(n_episodes):
+        s, total = env.reset(), 0.0
+        a = rng.integers(4) if rng.random() < 0.1 else Q[s].argmax()
+        for _ in range(200):
+            ns, r, done = env.step(a)
+            na = rng.integers(4) if rng.random() < 0.1 else Q[ns].argmax()
+            Q[s, a] += alpha * (r + gamma * Q[ns, na] - Q[s, a])
+            s, a, total = ns, na, total + r
+            if done:
+                break
+        rewards.append(total)
+    return np.mean(rewards[-100:])
+
 # alpha = 0.01, 0.1, 0.5 で比較
+print("α (学習率) の比較:")
 for alpha in [0.01, 0.1, 0.5]:
-    algo = get_algorithm("sarsa", n_states, n_actions, alpha=alpha)
+    print(f"  alpha={alpha:.2f} → 平均報酬={run_sarsa(alpha):.3f}")
 ```
 
 - 小さい α: 収束が遅いが安定
@@ -420,8 +470,11 @@ for alpha in [0.01, 0.1, 0.5]:
 ### 課題 2: γ (割引率) の影響
 
 ```python
+# 上の GridWorld / train 関数に続けて実行
+print("γ (割引率) の比較:")
 for gamma in [0.5, 0.9, 0.99]:
-    algo = get_algorithm("q", n_states, n_actions, gamma=gamma)
+    _, rewards = train(n_episodes=400, gamma=gamma)
+    print(f"  gamma={gamma} → 平均報酬={np.mean(rewards[-100:]):.3f}")
 ```
 
 - γ が小さい: 近い報酬を重視 → 近視眼的
@@ -430,8 +483,34 @@ for gamma in [0.5, 0.9, 0.99]:
 ### 課題 3: Dyna-Q の n_planning の影響
 
 ```python
+# 上の GridWorld クラス定義に続けて実行
+def run_dyna_q(n_planning, n_episodes=400, alpha=0.1, gamma=0.95, seed=0):
+    env, Q, model, seen = GridWorld(), np.zeros((16, 4)), {}, []
+    rng = np.random.default_rng(seed)
+    eps, rewards = 1.0, []
+    for _ in range(n_episodes):
+        s, total = env.reset(), 0.0
+        for _ in range(200):
+            a = rng.integers(4) if rng.random() < eps else Q[s].argmax()
+            ns, r, done = env.step(a)
+            Q[s, a] += alpha * (r + gamma * Q[ns].max() - Q[s, a])
+            model[(s, a)] = (r, ns)
+            if (s, a) not in seen:
+                seen.append((s, a))
+            for _ in range(n_planning):
+                ps, pa = seen[rng.integers(len(seen))]
+                pr, pns = model[(ps, pa)]
+                Q[ps, pa] += alpha * (pr + gamma * Q[pns].max() - Q[ps, pa])
+            s, total = ns, total + r
+            if done:
+                break
+        rewards.append(total)
+        eps = max(0.05, eps * 0.995)
+    return np.mean(rewards[-100:])
+
+print("Dyna-Q n_planning の比較:")
 for n in [0, 5, 20, 50]:
-    algo = get_algorithm("dyna_q", n_states, n_actions, n_planning=n)
+    print(f"  n_planning={n:2d} → 平均報酬={run_dyna_q(n):.3f}")
 ```
 
 n_planning が大きいほどサンプル効率が良いが、計算時間が増える。
@@ -439,9 +518,48 @@ n_planning が大きいほどサンプル効率が良いが、計算時間が増
 ### 課題 4: SARSA vs Q-learning on CliffWalk
 
 ```python
-# CliffWalk で SARSA と Q-learning を比較する
-for algo_name in ["sarsa", "q"]:
-    # reward の推移をプロットして経路の違いを観察
+import numpy as np
+
+class CliffWalk:
+    H, W, START, GOAL = 4, 12, 36, 47
+    ACTIONS = [(-1,0),(0,1),(1,0),(0,-1)]
+
+    def reset(self):
+        self.state = self.START
+        return self.state
+
+    def step(self, a):
+        r, c = divmod(self.state, self.W)
+        dr, dc = self.ACTIONS[a]
+        self.state = max(0,min(self.H-1,r+dr))*self.W + max(0,min(self.W-1,c+dc))
+        if self.state // self.W == 3 and 1 <= self.state % self.W <= 10:
+            return self.START, -100, False  # 崖
+        done = (self.state == self.GOAL)
+        return self.state, (0 if done else -1), done
+
+def run_cliff(algo, n_episodes=500, alpha=0.1, gamma=0.95, eps=0.1, seed=0):
+    env, Q = CliffWalk(), np.zeros((48, 4))
+    rng = np.random.default_rng(seed)
+    rewards = []
+    for _ in range(n_episodes):
+        s, total = env.reset(), 0.0
+        a = rng.integers(4) if rng.random() < eps else Q[s].argmax()
+        for _ in range(500):
+            ns, r, done = env.step(a)
+            na = rng.integers(4) if rng.random() < eps else Q[ns].argmax()
+            if algo == "sarsa":
+                Q[s, a] += alpha * (r + gamma * Q[ns, na] - Q[s, a])
+            else:
+                Q[s, a] += alpha * (r + gamma * Q[ns].max() - Q[s, a])
+            s, a, total = ns, na, total + r
+            if done:
+                break
+        rewards.append(total)
+    return np.mean(rewards[-100:])
+
+print("CliffWalk: SARSA vs Q-learning")
+print(f"  SARSA      → 平均報酬={run_cliff('sarsa'):.1f}  (安全な迂回路)")
+print(f"  Q-learning → 平均報酬={run_cliff('q'):.1f}  (崖際の最短路)")
 ```
 
 SARSA は安全経路 (-17 付近) を、Q は最短経路 (-13 付近) を学ぶはずです。
@@ -449,10 +567,70 @@ SARSA は安全経路 (-17 付近) を、Q は最短経路 (-13 付近) を学�
 ### 課題 5: Double Q の有効性確認
 
 ```python
-# 確率的環境でのみ Double Q が有利
-for algo_name in ["q", "double_q"]:
-    env_factory = lambda seed: get_env("stochastic", seed=seed)
-    # stochastic 環境では double_q が高い報酬を示すはず
+import numpy as np
+
+class StochasticGrid:
+    H, W, GOAL = 4, 4, 15
+    ACTIONS = [(-1,0),(0,1),(1,0),(0,-1)]
+
+    def __init__(self, slip=0.2, seed=0):
+        self.slip = slip
+        self.rng  = np.random.default_rng(seed)
+
+    def reset(self):
+        self.state = 0
+        return 0
+
+    def step(self, a):
+        if self.rng.random() < self.slip:
+            a = (a + self.rng.choice([-1, 1])) % 4
+        r, c = divmod(self.state, self.W)
+        dr, dc = self.ACTIONS[a]
+        self.state = max(0,min(self.H-1,r+dr))*4 + max(0,min(self.W-1,c+dc))
+        done = (self.state == self.GOAL)
+        return self.state, (1.0 if done else -0.04), done
+
+def run_q_stochastic(n_episodes=500, alpha=0.1, gamma=0.95, seed=0):
+    env, Q = StochasticGrid(seed=seed), np.zeros((16, 4))
+    rng = np.random.default_rng(seed)
+    eps, rewards = 1.0, []
+    for _ in range(n_episodes):
+        s, total = env.reset(), 0.0
+        for _ in range(200):
+            a = rng.integers(4) if rng.random() < eps else Q[s].argmax()
+            ns, r, done = env.step(a)
+            Q[s, a] += alpha * (r + gamma * Q[ns].max() - Q[s, a])
+            s, total = ns, total + r
+            if done:
+                break
+        rewards.append(total)
+        eps = max(0.05, eps * 0.995)
+    return np.mean(rewards[-100:])
+
+def run_double_q(n_episodes=500, alpha=0.1, gamma=0.95, seed=0):
+    env = StochasticGrid(seed=seed)
+    QA, QB = np.zeros((16, 4)), np.zeros((16, 4))
+    rng = np.random.default_rng(seed)
+    eps, rewards = 1.0, []
+    for _ in range(n_episodes):
+        s, total = env.reset(), 0.0
+        for _ in range(200):
+            a = rng.integers(4) if rng.random() < eps else (QA+QB)[s].argmax()
+            ns, r, done = env.step(a)
+            if rng.random() < 0.5:
+                QA[s, a] += alpha * (r + gamma * QB[ns, QA[ns].argmax()] - QA[s, a])
+            else:
+                QB[s, a] += alpha * (r + gamma * QA[ns, QB[ns].argmax()] - QB[s, a])
+            s, total = ns, total + r
+            if done:
+                break
+        rewards.append(total)
+        eps = max(0.05, eps * 0.995)
+    return np.mean(rewards[-100:])
+
+print("確率的環境: Q-learning vs Double Q-learning")
+print(f"  Q-learning   → 平均報酬={run_q_stochastic():.3f}")
+print(f"  Double Q     → 平均報酬={run_double_q():.3f}")
 ```
 
 ---

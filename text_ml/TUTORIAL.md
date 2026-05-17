@@ -55,10 +55,13 @@ n=2 と n=3 の両方を使う (`ns=(2,3)`) と更に多様な特徴が取れる
 ### 実際に動かしてみる
 
 ```python
-from tokenizer import get_tokenizer
+def char_ngram(text, ns=(2, 3)):
+    tokens = []
+    for n in ns:
+        tokens += [text[i:i+n] for i in range(len(text) - n + 1)]
+    return tokens
 
-tok = get_tokenizer("char_ngram", ns=(2, 3))
-print(tok.tokenize("機械学習はとても面白い"))
+print(char_ngram("機械学習はとても面白い"))
 # → ['機械', '械学', '学習', '習は', 'はと', 'とて', 'ても', '面白', '白い',
 #    '機械学', '械学習', '学習は', ...]
 ```
@@ -310,21 +313,84 @@ regex       bm25        svm               0.908
 ### 推奨構成のみ試す
 
 ```python
-from data       import load_dataset
-from tokenizer  import get_tokenizer
-from vectorizer import get_vectorizer
-from classifier import get_classifier
-from pipeline   import TextClassificationPipeline
+import numpy as np
+from collections import Counter
+import math
 
-train, test = load_dataset(seed=42)
+# --- サンプルデータ ---
+TEXTS = [
+    "機械学習はとても面白い技術です", "ディープラーニングでAIが進化している",
+    "ニューラルネットワークの研究が盛んです", "データサイエンスが注目されています",
+    "サッカーの試合でゴールが決まった", "野球チームが優勝した",
+    "バスケットボールの選手が活躍した", "テニスの全国大会が開催された",
+    "政治家が演説を行いました", "国会で新しい法律が成立した",
+    "選挙で投票率が上昇した", "議員が外交問題を議論した",
+]
+LABELS = [0,0,0,0, 1,1,1,1, 2,2,2,2]
+LABEL_NAMES = ["IT", "スポーツ", "政治"]
 
-pipe = TextClassificationPipeline(
-    tokenizer  = get_tokenizer("char_ngram", ns=(2, 3)),
-    vectorizer = get_vectorizer("tfidf"),
-    classifier = get_classifier("svm"),
-)
-pipe.fit(train.texts, train.labels)
-preds = pipe.predict(test.texts)
+# --- 文字 N-gram トークナイザ ---
+def char_ngram(text, ns=(2, 3)):
+    tokens = []
+    for n in ns:
+        tokens += [text[i:i+n] for i in range(len(text) - n + 1)]
+    return tokens
+
+# --- TF-IDF ---
+def fit_tfidf(token_lists):
+    n = len(token_lists)
+    df = Counter(t for tl in token_lists for t in set(tl))
+    vocab = {t: i for i, t in enumerate(sorted(df))}
+    idf = np.array([math.log((1+n)/(1+df[t]))+1 for t in sorted(df)])
+    return vocab, idf
+
+def transform_tfidf(token_lists, vocab, idf):
+    X = np.zeros((len(token_lists), len(vocab)))
+    for i, tl in enumerate(token_lists):
+        for t in tl:
+            if t in vocab:
+                X[i, vocab[t]] += 1
+    mask = X > 0
+    X[mask] = 1 + np.log(X[mask])
+    X *= idf
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    return X / norms
+
+# --- ナイーブベイズ分類器 ---
+class NaiveBayes:
+    def fit(self, X, y):
+        self.classes = np.unique(y)
+        self.log_prior = np.log([np.mean(y == c) for c in self.classes])
+        self.log_prob = np.array([
+            np.log((np.clip(X[y==c], 0, None).sum(0) + 1) /
+                   (np.clip(X[y==c], 0, None).sum() + X.shape[1]))
+            for c in self.classes
+        ])
+    def predict(self, X):
+        scores = np.clip(X, 0, None) @ self.log_prob.T + self.log_prior
+        return self.classes[scores.argmax(1)]
+
+# --- 実行 ---
+train_texts, train_labels = TEXTS[:9], LABELS[:9]
+test_texts,  test_labels  = TEXTS[9:], LABELS[9:]
+
+train_tok = [char_ngram(t) for t in train_texts]
+test_tok  = [char_ngram(t) for t in test_texts]
+
+vocab, idf = fit_tfidf(train_tok)
+X_train = transform_tfidf(train_tok, vocab, idf)
+X_test  = transform_tfidf(test_tok,  vocab, idf)
+
+clf = NaiveBayes()
+clf.fit(X_train, np.array(train_labels))
+preds = clf.predict(X_test)
+
+print("予測結果:")
+for text, true, pred in zip(test_texts, test_labels, preds):
+    mark = "○" if true == pred else "×"
+    print(f"  {mark} 真={LABEL_NAMES[true]} / 予={LABEL_NAMES[pred]} : {text}")
+print(f"\n正解率: {np.mean(preds == np.array(test_labels)):.1%}")
 ```
 
 ---
@@ -334,20 +400,58 @@ preds = pipe.predict(test.texts)
 ### 課題 1: IDF の効果を確認する
 
 ```python
-# TF-IDF と BoW を比較する
-from vectorizer import get_vectorizer
-from tokenizer  import get_tokenizer
+import numpy as np
+from collections import Counter
+import math
 
-tok = get_tokenizer("char_ngram")
-train, test = __import__("data").load_dataset()
-tokens = [tok.tokenize(t) for t in train.texts]
+TEXTS = [
+    "機械学習はとても面白い技術です", "ディープラーニングでAIが進化している",
+    "ニューラルネットワークの研究が盛んです", "データサイエンスが注目されています",
+    "サッカーの試合でゴールが決まった", "野球チームが優勝した",
+    "バスケットボールの選手が活躍した", "テニスの全国大会が開催された",
+    "政治家が演説を行いました", "国会で新しい法律が成立した",
+]
 
-vec_count = get_vectorizer("count").fit(tokens)
-vec_tfidf = get_vectorizer("tfidf").fit(tokens)
+def char_ngram(text, ns=(2, 3)):
+    tokens = []
+    for n in ns:
+        tokens += [text[i:i+n] for i in range(len(text) - n + 1)]
+    return tokens
+
+tokens = [char_ngram(t) for t in TEXTS]
+
+df    = Counter(t for tl in tokens for t in set(tl))
+vocab = {t: i for i, t in enumerate(sorted(df))}
+inv   = {i: t for t, i in vocab.items()}
+n     = len(tokens)
+
+# Count ベクトル (出現回数)
+X_count = np.zeros((n, len(vocab)))
+for i, tl in enumerate(tokens):
+    for t in tl:
+        if t in vocab:
+            X_count[i, vocab[t]] += 1
+
+# TF-IDF ベクトル
+idf = np.array([math.log((1+n)/(1+df[t]))+1 for t in sorted(df)])
+X_tfidf = X_count.copy()
+mask = X_tfidf > 0
+X_tfidf[mask] = 1 + np.log(X_tfidf[mask])
+X_tfidf *= idf
+norms = np.linalg.norm(X_tfidf, axis=1, keepdims=True)
+norms[norms == 0] = 1
+X_tfidf /= norms
 
 # 同じ文書でもベクトルの中身が違う → IDF の影響を観察
-x_count = vec_count.transform(tokens[:1])
-x_tfidf = vec_tfidf.transform(tokens[:1])
+print("Count ベクトル (最初の文書, 非ゼロ上位5):")
+for i in X_count[0].argsort()[::-1][:5]:
+    if X_count[0, i] > 0:
+        print(f"  '{inv[i]}': {X_count[0,i]:.2f}")
+
+print("\nTF-IDF ベクトル (最初の文書, 上位5):")
+for i in X_tfidf[0].argsort()[::-1][:5]:
+    if X_tfidf[0, i] > 0:
+        print(f"  '{inv[i]}': {X_tfidf[0,i]:.3f}")
 ```
 
 ### 課題 2: n の大きさと精度の関係
@@ -363,11 +467,17 @@ x_tfidf = vec_tfidf.transform(tokens[:1])
 ### 課題 4: 未知語を含む文書を予測してみる
 
 ```python
-texts = ["全く関係ない新語を含む文章テスト"]
-preds = pipe.predict(texts)
+# 上の「推奨構成のみ試す」コードに続けて実行 (clf / vocab / idf が定義済みの前提)
+texts  = ["全く関係ない新語を含む文章テスト"]
+tok    = [char_ngram(t) for t in texts]
+X_new  = transform_tfidf(tok, vocab, idf)
+pred   = clf.predict(X_new)
+print(f"予測クラス: {LABEL_NAMES[pred[0]]}")
+known = sum(1 for t in tok[0] if t in vocab)
+print(f"既知トークン: {known}/{len(tok[0])}  未知語割合: {1 - known/max(len(tok[0]),1):.1%}")
 ```
 
-HashingVectorizer と TfIdfVectorizer でどう振る舞いが変わるかを確認する。
+既知のトークンが少ないほどベクトルがゼロに近づき、予測が不安定になることを確認できる。
 
 ---
 
